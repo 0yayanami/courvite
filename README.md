@@ -52,3 +52,7 @@ Code layout:
 
 Map data © OpenStreetMap contributors. Barlow fonts are under the SIL Open Font
 License (`assets/fonts/OFL.txt`).
+
+## License
+
+Courvite is released under the [MIT License](LICENSE).
