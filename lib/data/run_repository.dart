@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
@@ -51,7 +53,9 @@ class RunRepository extends ChangeNotifier {
     );
     final repo = RunRepository._(db);
     await repo._recoverUnfinishedRuns();
-    await repo._backfillStats();
+    // Not awaited: with many runs this can take a while, and the app should
+    // open right away. Stats fill in as runs are processed.
+    unawaited(repo._backfillStats());
     return repo;
   }
 
@@ -126,19 +130,46 @@ class RunRepository extends ChangeNotifier {
     });
   }
 
-  /// Computes the derived stats of runs saved before they existed.
-  Future<void> _backfillStats() async {
-    final rows = await _db.query(
-      'runs',
-      columns: ['id'],
-      where: 'end_time IS NOT NULL AND stats_version < ?',
-      whereArgs: [_statsVersion],
-    );
-    for (final row in rows) {
-      final id = row['id'] as int;
-      final points = await loadPoints(id);
-      await _saveDerived(id, RunStatsBuilder.fromPoints(points), points);
+  Future<void>? _backfill;
+
+  /// Computes the derived stats of runs saved before they existed, or of
+  /// imported runs. Runs in the background; concurrent calls share one pass,
+  /// which keeps going until no run is left behind.
+  Future<void> _backfillStats() =>
+      _backfill ??= _runBackfill().whenComplete(() => _backfill = null);
+
+  Future<void> _runBackfill() async {
+    final failed = <int>{};
+    var sinceNotify = 0;
+    while (true) {
+      final rows = await _db.query(
+        'runs',
+        columns: ['id'],
+        where:
+            'end_time IS NOT NULL AND stats_version < ? '
+            'AND id NOT IN (${failed.join(',')})',
+        whereArgs: [_statsVersion],
+        orderBy: 'start_time DESC', // Recent runs matter most: do them first.
+        limit: 20,
+      );
+      if (rows.isEmpty) break;
+      for (final row in rows) {
+        final id = row['id'] as int;
+        try {
+          final points = await loadPoints(id);
+          await _saveDerived(id, RunStatsBuilder.fromPoints(points), points);
+        } on Object catch (e) {
+          // E.g. the run was deleted meanwhile. Don't retry it in this pass.
+          debugPrint('Could not update stats of run $id: $e');
+          failed.add(id);
+        }
+        if (++sinceNotify >= 10) {
+          sinceNotify = 0;
+          notifyListeners();
+        }
+      }
     }
+    if (sinceNotify > 0) notifyListeners();
   }
 
   /// A run whose end_time is null was interrupted (e.g. the app process was
@@ -292,8 +323,8 @@ class RunRepository extends ChangeNotifier {
         added++;
       }
     });
-    await _backfillStats();
     notifyListeners();
+    unawaited(_backfillStats()); // Best efforts, territory… fill in shortly.
     return (added: added, skipped: skipped);
   }
 
