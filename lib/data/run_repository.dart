@@ -141,35 +141,42 @@ class RunRepository extends ChangeNotifier {
   Future<void> _runBackfill() async {
     final failed = <int>{};
     var sinceNotify = 0;
-    while (true) {
-      final rows = await _db.query(
-        'runs',
-        columns: ['id'],
-        where:
-            'end_time IS NOT NULL AND stats_version < ? '
-            'AND id NOT IN (${failed.join(',')})',
-        whereArgs: [_statsVersion],
-        orderBy: 'start_time DESC', // Recent runs matter most: do them first.
-        limit: 20,
-      );
-      if (rows.isEmpty) break;
-      for (final row in rows) {
-        final id = row['id'] as int;
-        try {
-          final points = await loadPoints(id);
-          await _saveDerived(id, RunStatsBuilder.fromPoints(points), points);
-        } on Object catch (e) {
-          // E.g. the run was deleted meanwhile. Don't retry it in this pass.
-          debugPrint('Could not update stats of run $id: $e');
-          failed.add(id);
-        }
-        if (++sinceNotify >= 10) {
-          sinceNotify = 0;
-          notifyListeners();
+    try {
+      while (true) {
+        final rows = await _db.query(
+          'runs',
+          columns: ['id'],
+          where:
+              'end_time IS NOT NULL AND stats_version < ? '
+              'AND id NOT IN (${failed.join(',')})',
+          whereArgs: [_statsVersion],
+          orderBy: 'start_time DESC', // Recent runs matter most: do them first.
+          limit: 20,
+        );
+        if (rows.isEmpty) break;
+        for (final row in rows) {
+          final id = row['id'] as int;
+          try {
+            final points = await loadPoints(id);
+            await _saveDerived(id, RunStatsBuilder.fromPoints(points), points);
+          } on Object catch (e) {
+            // E.g. the run was deleted meanwhile. Don't retry it in this pass.
+            debugPrint('Could not update stats of run $id: $e');
+            failed.add(id);
+          }
+          if (++sinceNotify >= 10) {
+            sinceNotify = 0;
+            notifyListeners();
+          }
         }
       }
+    } on Object catch (e) {
+      // Nobody awaits this pass: log instead of leaving an uncaught error.
+      // Remaining runs are picked up by the next pass (next import or launch).
+      debugPrint('Stats backfill stopped: $e');
+    } finally {
+      if (sinceNotify > 0) notifyListeners();
     }
-    if (sinceNotify > 0) notifyListeners();
   }
 
   /// A run whose end_time is null was interrupted (e.g. the app process was
