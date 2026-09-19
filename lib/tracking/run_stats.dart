@@ -126,8 +126,11 @@ class RunStatsBuilder {
     return result;
   }
 
-  double get elevationGainMeters => _elevation.gain;
-  double get elevationLossMeters => _elevation.loss;
+  /// Null when the GPS provided no altitude at all.
+  double? get elevationGainMeters =>
+      _elevation.hasData ? _elevation.gain : null;
+  double? get elevationLossMeters =>
+      _elevation.hasData ? _elevation.loss : null;
 
   /// Fastest time over any continuous [meters] of the run (pauses excluded),
   /// or null if the run is shorter than that.
@@ -177,6 +180,8 @@ class ElevationAccumulator {
   double? _reference;
   double gain = 0;
   double loss = 0;
+
+  bool get hasData => _reference != null;
 
   void add(double? altitude) {
     if (altitude == null) return;

@@ -130,4 +130,19 @@ void main() {
     expect(hill.gain, closeTo(50, 4));
     expect(hill.loss, closeTo(30, 4));
   });
+
+  test('elevation is unknown when the GPS gave no altitude', () {
+    final b = RunStatsBuilder();
+    for (var i = 0; i <= 50; i++) {
+      b.add(_pt(i * 10.0, i * 3));
+    }
+    expect(b.elevationGainMeters, isNull);
+    expect(b.elevationLossMeters, isNull);
+
+    final withAltitude = RunStatsBuilder();
+    for (var i = 0; i <= 50; i++) {
+      withAltitude.add(_pt(i * 10.0, i * 3, altitude: 80));
+    }
+    expect(withAltitude.elevationGainMeters, 0);
+  });
 }
