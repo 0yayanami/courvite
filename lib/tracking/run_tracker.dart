@@ -3,13 +3,29 @@ import 'dart:collection';
 
 import 'package:flutter/widgets.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:permission_handler/permission_handler.dart';
+import 'package:permission_handler/permission_handler.dart'
+    show Permission, PermissionActions;
 
 import '../data/run_repository.dart';
 import '../models/run.dart';
 import 'run_stats.dart';
 
 enum TrackerState { idle, running, paused }
+
+/// Whether GPS can be used, as far as settings and permissions go.
+enum GpsAccess {
+  /// Not checked yet, or everything is fine.
+  ok,
+
+  /// Location is switched off on the phone.
+  serviceOff,
+
+  /// Location permission not granted (or a one-time grant that expired).
+  denied,
+
+  /// Only approximate location allowed: GPS needs precise location.
+  approximate,
+}
 
 /// Records a run: listens to GPS through a foreground service (so tracking
 /// continues with the screen off), computes live stats and persists accepted
@@ -66,6 +82,13 @@ class RunTracker extends ChangeNotifier {
 
   /// Set when the location stream reports an error during a run.
   String? _gpsError;
+
+  GpsAccess _access = GpsAccess.ok;
+  GpsAccess get access => _access;
+
+  /// Watches the location switch while previewing, so turning location on
+  /// from the quick settings is picked up without leaving the app.
+  StreamSubscription<ServiceStatus>? _serviceSub;
 
   /// A read-only view (no copy) of the recorded route.
   List<TrackPoint> get track => UnmodifiableListView(_track);
@@ -125,6 +148,17 @@ class RunTracker extends ChangeNotifier {
     if (perm == LocationPermission.denied) {
       return 'Location permission is required to record a run.';
     }
+    if (await Geolocator.getLocationAccuracy() ==
+        LocationAccuracyStatus.reduced) {
+      // Asking again offers to upgrade approximate to precise location.
+      await Geolocator.requestPermission();
+      if (await Geolocator.getLocationAccuracy() ==
+          LocationAccuracyStatus.reduced) {
+        await Geolocator.openAppSettings();
+        return 'Courvite needs precise location to measure your runs. '
+            'Turn on "Use precise location" in its location permission.';
+      }
+    }
     // Needed to display the ongoing-run notification; tracking works without.
     await Permission.notification.request();
     return null;
@@ -142,12 +176,18 @@ class RunTracker extends ChangeNotifier {
         generation != _gpsGeneration ||
         _state != TrackerState.idle ||
         _sub != null;
-    final perm = await Geolocator.checkPermission();
+    _serviceSub ??= Geolocator.getServiceStatusStream().listen((_) {
+      // Location switched on or off: check again from scratch.
+      coolDown();
+      warmUp();
+    });
+    final access = await _checkAccess();
     if (stale()) return;
-    if (perm != LocationPermission.always &&
-        perm != LocationPermission.whileInUse) {
-      return;
+    if (access != _access) {
+      _access = access;
+      notifyListeners();
     }
+    if (access != GpsAccess.ok) return;
     final last = await Geolocator.getLastKnownPosition(
       forceAndroidLocationManager: true,
     );
@@ -159,8 +199,48 @@ class RunTracker extends ChangeNotifier {
         intervalDuration: const Duration(seconds: 1),
         forceLocationManager: true,
       ),
-    ).listen(_onPosition, onError: (Object e) => debugPrint('GPS error: $e'));
+    ).listen(_onPosition, onError: _onPreviewError);
     notifyListeners();
+  }
+
+  static Future<GpsAccess> _checkAccess() async {
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      return GpsAccess.serviceOff;
+    }
+    final perm = await Geolocator.checkPermission();
+    if (perm != LocationPermission.always &&
+        perm != LocationPermission.whileInUse) {
+      return GpsAccess.denied;
+    }
+    if (await Geolocator.getLocationAccuracy() ==
+        LocationAccuracyStatus.reduced) {
+      return GpsAccess.approximate;
+    }
+    return GpsAccess.ok;
+  }
+
+  void _onPreviewError(Object e) {
+    debugPrint('GPS preview error: $e');
+    if (_state != TrackerState.idle) return;
+    // Drop the broken stream so the next warmUp() starts a fresh one.
+    _sub?.cancel();
+    _sub = null;
+    _access = switch (e) {
+      LocationServiceDisabledException() => GpsAccess.serviceOff,
+      PermissionDeniedException() => GpsAccess.denied,
+      _ => _access,
+    };
+    _lastFix = null;
+    notifyListeners();
+  }
+
+  /// Asks for whatever is missing (location on, permission, precise
+  /// location), then restarts the preview. Returns an error to show, if any.
+  Future<String?> requestAccess() async {
+    final error = await ensurePermissions();
+    coolDown();
+    await warmUp();
+    return error;
   }
 
   void coolDown() {
@@ -170,9 +250,16 @@ class RunTracker extends ChangeNotifier {
     _sub = null;
   }
 
+  /// Stops everything the preview uses, including the location switch watch.
+  void stopPreview() {
+    coolDown();
+    _serviceSub?.cancel();
+    _serviceSub = null;
+  }
+
   Future<void> start() async {
     if (_state != TrackerState.idle) return;
-    coolDown();
+    stopPreview();
     final now = DateTime.now();
     _runId = await _repo.startRun(now);
     _stats = RunStatsBuilder();
@@ -387,6 +474,7 @@ class RunTracker extends ChangeNotifier {
   @override
   void dispose() {
     _sub?.cancel();
+    _serviceSub?.cancel();
     _ticker?.cancel();
     _lifecycle?.dispose();
     super.dispose();

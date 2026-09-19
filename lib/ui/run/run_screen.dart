@@ -61,7 +61,7 @@ class _RunScreenState extends State<RunScreen> {
     if (widget.visible && _appVisible) {
       _tracker.warmUp();
     } else {
-      _tracker.coolDown();
+      _tracker.stopPreview();
     }
   }
 
@@ -245,42 +245,78 @@ class _GpsPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (label, color) = context.select<RunTracker, (String, Color)>((t) {
-      final fix = t.lastFix;
-      return switch (fix) {
-        _ when t.gpsProblem != null => ('No GPS', AppColors.danger),
-        null => ('Searching GPS', Colors.orange),
-        _ when t.hasGoodFix => ('GPS ±${fix.accuracy.round()} m', AppColors.go),
-        _ when !RunTracker.hasAccuracyEstimate(fix) => (
-          'GPS accuracy unknown',
-          Colors.orange,
-        ),
-        _ => ('Weak GPS ±${fix.accuracy.round()} m', Colors.orange),
-      };
-    });
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: AppColors.canvas,
+    final (label, color, fixable) = context
+        .select<RunTracker, (String, Color, bool)>((t) {
+          final fix = t.lastFix;
+          if (t.gpsProblem != null) return ('No GPS', AppColors.danger, false);
+          if (t.state == TrackerState.idle) {
+            switch (t.access) {
+              case GpsAccess.serviceOff:
+                return ('Location off', AppColors.danger, true);
+              case GpsAccess.denied:
+                return ('Allow location', Colors.orange, true);
+              case GpsAccess.approximate:
+                return ('Precise location off', Colors.orange, true);
+              case GpsAccess.ok:
+                break;
+            }
+          }
+          return switch (fix) {
+            null => ('Searching GPS', Colors.orange, false),
+            _ when t.hasGoodFix => (
+              'GPS ±${fix.accuracy.round()} m',
+              AppColors.go,
+              false,
+            ),
+            _ when !RunTracker.hasAccuracyEstimate(fix) => (
+              'GPS accuracy unknown',
+              Colors.orange,
+              false,
+            ),
+            _ => ('Weak GPS ±${fix.accuracy.round()} m', Colors.orange, false),
+          };
+        });
+    return Material(
+      color: AppColors.canvas,
+      borderRadius: BorderRadius.circular(20),
+      elevation: 3,
+      shadowColor: const Color(0x44000000),
+      child: InkWell(
         borderRadius: BorderRadius.circular(20),
-        boxShadow: const [BoxShadow(blurRadius: 8, color: Color(0x22000000))],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        onTap: fixable ? () => _fix(context) : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              if (fixable) ...[
+                const SizedBox(width: 4),
+                const Icon(Icons.chevron_right_rounded, size: 18),
+              ],
+            ],
           ),
-          const SizedBox(width: 8),
-          Text(
-            label,
-            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
-          ),
-        ],
+        ),
       ),
     );
+  }
+
+  Future<void> _fix(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final error = await context.read<RunTracker>().requestAccess();
+    if (error != null) messenger.showSnackBar(SnackBar(content: Text(error)));
   }
 }
 
@@ -308,7 +344,9 @@ class _IdlePanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final hasFix = context.select<RunTracker, bool>((t) => t.hasGoodFix);
+    final (hasFix, access) = context.select<RunTracker, (bool, GpsAccess)>(
+      (t) => (t.hasGoodFix, t.access),
+    );
     return Column(
       children: [
         const _Grabber(),
@@ -368,10 +406,13 @@ class _IdlePanel extends StatelessWidget {
         const Spacer(),
         _GoButton(onPressed: onStart),
         const SizedBox(height: 14),
-        Text(
-          hasFix ? 'GPS locked. Let\'s go!' : 'Waiting for a good GPS signal…',
-          style: const TextStyle(color: AppColors.muted, fontSize: 14),
-        ),
+        Text(switch (access) {
+          GpsAccess.serviceOff => 'Turn on location to record a run.',
+          GpsAccess.denied => 'Courvite needs location access to track you.',
+          GpsAccess.approximate => 'Courvite needs precise location.',
+          GpsAccess.ok when hasFix => 'GPS locked. Let\'s go!',
+          GpsAccess.ok => 'Waiting for a good GPS signal…',
+        }, style: const TextStyle(color: AppColors.muted, fontSize: 14)),
         const Spacer(),
       ],
     );
