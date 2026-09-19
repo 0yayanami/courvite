@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:http/http.dart';
+import 'package:http/retry.dart';
 import 'package:latlong2/latlong.dart' hide Path;
 
 import '../../models/run.dart';
@@ -19,11 +21,24 @@ const _tileFilter = ColorFilter.matrix([
   0, 0, 0, 1, 0,
 ]);
 
-/// One filter over the whole tile layer: a single offscreen pass, instead of
-/// one per tile when applied in `tileBuilder`.
+/// One HTTP client for all maps, so tile requests reuse connections to the
+/// tile server. Never closed: a [NetworkTileProvider] given a client doesn't
+/// close it when its map goes away.
+final _tileClient = RetryClient(Client());
+
+/// The tile layer, with one filter over the whole layer: a single offscreen
+/// pass, instead of one per tile when applied in `tileBuilder`.
+///
+/// Create it once per map (e.g. in a State), not in every build: each
+/// [TileLayer] gets its own tile provider, and flutter_map only disposes the
+/// last one.
 Widget mapTiles() => ColorFiltered(
   colorFilter: _tileFilter,
-  child: TileLayer(urlTemplate: _tileUrl, userAgentPackageName: _userAgent),
+  child: TileLayer(
+    urlTemplate: _tileUrl,
+    userAgentPackageName: _userAgent,
+    tileProvider: NetworkTileProvider(httpClient: _tileClient),
+  ),
 );
 
 List<Polyline> _polylines(List<TrackPoint> points) {
@@ -178,6 +193,7 @@ class LiveRunMap extends StatefulWidget {
 
 class _LiveRunMapState extends State<LiveRunMap> {
   final _controller = MapController();
+  final _tiles = mapTiles(); // Rebuilt on every GPS fix otherwise.
   bool _ready = false;
   bool _follow = true;
 
@@ -248,7 +264,7 @@ class _LiveRunMapState extends State<LiveRunMap> {
             },
           ),
           children: [
-            mapTiles(),
+            _tiles,
             PolylineLayer(polylines: _polylinesFor(widget)),
             if (pos != null)
               MarkerLayer(
@@ -275,7 +291,8 @@ class _LiveRunMapState extends State<LiveRunMap> {
               shape: const CircleBorder(),
               onPressed: () {
                 setState(() => _follow = true);
-                _moveTo(pos, _controller.camera.zoom);
+                // Back to street level if the map was zoomed far out or in.
+                _moveTo(pos, _controller.camera.zoom.clamp(16, 18));
               },
               child: const Icon(Icons.near_me_rounded),
             ),
