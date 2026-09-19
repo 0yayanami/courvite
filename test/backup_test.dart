@@ -14,7 +14,13 @@ void main() {
     duration: const Duration(minutes: 28),
     distanceMeters: 5012.5,
     points: [
-      TrackPoint(lat: 48.8566, lon: 2.3522, time: start, altitude: 60, accuracy: 4),
+      TrackPoint(
+        lat: 48.8566,
+        lon: 2.3522,
+        time: start,
+        altitude: 60,
+        accuracy: 4,
+      ),
       TrackPoint(
         lat: 48.8576,
         lon: 2.3532,
