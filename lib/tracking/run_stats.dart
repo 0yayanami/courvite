@@ -63,7 +63,12 @@ class RunStatsBuilder {
     final dtMs = p.time.difference(last.time).inMilliseconds;
     if (dtMs <= 0) return false;
     final d = haversineMeters(last.lat, last.lon, p.lat, p.lon);
-    if (d < minStepMeters) return false;
+    if (d < minStepMeters) {
+      // Standing still: nothing to record, but time passes for the current
+      // pace, which would otherwise freeze at the last moving value.
+      _addRecent(_activeMs + dtMs, _distance);
+      return false;
+    }
     if (d / (dtMs / 1000) > maxSpeedMps) return false;
 
     final prevDistance = _distance;
@@ -77,12 +82,19 @@ class RunStatsBuilder {
       _splitEndsMs.add(prevMs + (dtMs * ratio).round());
       nextKm += 1000;
     }
-    _recent.add((_activeMs, _distance));
-    _recent.removeWhere((s) => _activeMs - s.$1 > 30000);
+    _addRecent(_activeMs, _distance);
     _cumulative.add((_activeMs, _distance));
     _elevation.add(p.altitude);
     _last = p;
     return true;
+  }
+
+  void _addRecent(int ms, double distance) {
+    _recent.add((ms, distance));
+    // Keep the newest sample older than the window as its starting point.
+    while (_recent.length > 1 && ms - _recent[1].$1 >= 30000) {
+      _recent.removeAt(0);
+    }
   }
 
   /// Pace over roughly the last 30 seconds, in seconds per km.

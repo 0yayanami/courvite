@@ -33,7 +33,23 @@ class RunTracker extends ChangeNotifier {
 
   StreamSubscription<Position>? _sub;
   Timer? _ticker;
+
+  /// Point writes, chained so they are stored in order. Each write handles its
+  /// own failure, so one failed insert never breaks the chain.
   Future<void> _writes = Future.value();
+
+  /// Points whose write failed, retried when the run ends.
+  final List<(int, TrackPoint)> _unsaved = [];
+
+  /// Bumped whenever the GPS subscription is replaced, so a [warmUp] that
+  /// was waiting on the platform knows it's no longer wanted.
+  int _gpsGeneration = 0;
+
+  /// When the last fix arrived (receipt time, not the fix's own timestamp).
+  DateTime? _lastFixAt;
+
+  /// Set when the location stream reports an error during a run.
+  String? _gpsError;
 
   List<TrackPoint> get track => List.unmodifiable(_track);
   Position? get lastFix => _lastFix;
@@ -44,9 +60,28 @@ class RunTracker extends ChangeNotifier {
   List<KmSplit> get splits => _stats.splits(total: elapsed);
 
   /// Whether the last fix is precise enough to be recorded.
-  bool get hasGoodFix =>
-      _lastFix != null &&
-      _lastFix!.accuracy <= RunStatsBuilder.maxAccuracyMeters;
+  bool get hasGoodFix => _lastFix != null && _isAccurate(_lastFix!);
+
+  static bool _isAccurate(Position p) =>
+      hasAccuracyEstimate(p) && p.accuracy <= RunStatsBuilder.maxAccuracyMeters;
+
+  /// A fix without an accuracy estimate comes through with accuracy 0.
+  /// (`Position.hasAccuracy` can't be used: geolocator_android reports it as
+  /// false even for fixes that do have an accuracy.)
+  static bool hasAccuracyEstimate(Position p) => p.accuracy > 0;
+
+  /// A problem the runner should know about while recording: the location
+  /// stream failed, or no fix has arrived for a while. Null when all is well.
+  String? get gpsProblem {
+    if (_state == TrackerState.idle) return null;
+    if (_gpsError != null) return _gpsError;
+    final last = _lastFixAt;
+    if (last != null &&
+        DateTime.now().difference(last) > const Duration(seconds: 15)) {
+      return 'No GPS signal. Distance is not being recorded.';
+    }
+    return null;
+  }
 
   /// Active time, excluding pauses.
   Duration get elapsed {
@@ -83,15 +118,24 @@ class RunTracker extends ChangeNotifier {
   /// visible: no foreground service is involved.
   Future<void> warmUp() async {
     if (_state != TrackerState.idle || _sub != null) return;
+    final generation = ++_gpsGeneration;
+    // Anything may have happened while waiting on the platform: the run may
+    // have started (with its own stream) or the preview been cancelled.
+    bool stale() =>
+        generation != _gpsGeneration ||
+        _state != TrackerState.idle ||
+        _sub != null;
     final perm = await Geolocator.checkPermission();
+    if (stale()) return;
     if (perm != LocationPermission.always &&
         perm != LocationPermission.whileInUse) {
       return;
     }
-    if (_state != TrackerState.idle || _sub != null) return;
-    _lastFix = await Geolocator.getLastKnownPosition(
+    final last = await Geolocator.getLastKnownPosition(
       forceAndroidLocationManager: true,
     );
+    if (stale()) return;
+    _lastFix = last;
     _sub = Geolocator.getPositionStream(
       locationSettings: AndroidSettings(
         accuracy: LocationAccuracy.best,
@@ -104,6 +148,7 @@ class RunTracker extends ChangeNotifier {
 
   void coolDown() {
     if (_state != TrackerState.idle) return;
+    _gpsGeneration++;
     _sub?.cancel();
     _sub = null;
   }
@@ -119,8 +164,24 @@ class RunTracker extends ChangeNotifier {
     _seq = 0;
     _accumulated = Duration.zero;
     _segmentStart = now;
+    _unsaved.clear();
+    _writes = Future.value();
     _state = TrackerState.running;
+    _listenForRun();
 
+    _ticker = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) => notifyListeners(),
+    );
+    notifyListeners();
+  }
+
+  /// (Re)subscribes to GPS through the foreground service.
+  void _listenForRun() {
+    _gpsGeneration++;
+    _sub?.cancel();
+    _gpsError = null;
+    _lastFixAt = DateTime.now(); // Grace period before "no signal".
     _sub = Geolocator.getPositionStream(
       locationSettings: AndroidSettings(
         accuracy: LocationAccuracy.best,
@@ -140,18 +201,38 @@ class RunTracker extends ChangeNotifier {
           enableWakeLock: true,
         ),
       ),
-    ).listen(_onPosition, onError: (Object e) => debugPrint('GPS error: $e'));
+    ).listen(_onPosition, onError: _onGpsError);
+  }
 
-    _ticker = Timer.periodic(
-      const Duration(seconds: 1),
-      (_) => notifyListeners(),
-    );
+  void _onGpsError(Object e) {
+    debugPrint('GPS error: $e');
+    if (_state == TrackerState.idle) return;
+    _gpsError = switch (e) {
+      LocationServiceDisabledException() =>
+        'Location is turned off. Distance is not being recorded.',
+      PermissionDeniedException() =>
+        'Location permission was removed. Distance is not being recorded.',
+      _ => 'GPS stopped working. Distance is not being recorded.',
+    };
     notifyListeners();
+  }
+
+  /// Restarts GPS after [gpsProblem] was reported, once the runner fixed it.
+  /// Returns an error message if location is still unavailable.
+  Future<String?> retryGps() async {
+    if (_state == TrackerState.idle) return null;
+    final error = await ensurePermissions();
+    if (error != null) return error;
+    _listenForRun();
+    notifyListeners();
+    return null;
   }
 
   void _onPosition(Position pos) {
     _lastFix = pos;
-    if (_state == TrackerState.running) {
+    _lastFixAt = DateTime.now();
+    _gpsError = null;
+    if (_state == TrackerState.running && hasAccuracyEstimate(pos)) {
       final pt = TrackPoint(
         lat: pos.latitude,
         lon: pos.longitude,
@@ -167,10 +248,19 @@ class RunTracker extends ChangeNotifier {
         _track.add(pt);
         final runId = _runId!;
         final seq = _seq++;
-        _writes = _writes.then((_) => _repo.addPoint(runId, seq, pt));
+        _writes = _writes.then((_) => _save(runId, seq, pt));
       }
     }
     notifyListeners();
+  }
+
+  Future<void> _save(int runId, int seq, TrackPoint pt) async {
+    try {
+      await _repo.addPoint(runId, seq, pt);
+    } on Object catch (e) {
+      debugPrint('Could not save point $seq: $e');
+      _unsaved.add((seq, pt));
+    }
   }
 
   void pause() {
@@ -212,11 +302,26 @@ class RunTracker extends ChangeNotifier {
   }
 
   Future<void> _teardown() async {
+    _gpsGeneration++;
     await _sub?.cancel();
     _sub = null;
     _ticker?.cancel();
     _ticker = null;
     await _writes;
+    // Second chance for points that failed to save (e.g. a transient error).
+    final runId = _runId;
+    if (runId != null) {
+      for (final (seq, pt) in List.of(_unsaved)) {
+        try {
+          await _repo.addPoint(runId, seq, pt);
+          _unsaved.remove((seq, pt));
+        } on Object catch (e) {
+          debugPrint('Point $seq is lost: $e');
+        }
+      }
+    }
+    _gpsError = null;
+    _lastFixAt = null;
     _state = TrackerState.idle;
     _runId = null;
     _segmentStart = null;

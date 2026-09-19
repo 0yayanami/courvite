@@ -223,10 +223,15 @@ class _GpsPill extends StatelessWidget {
   Widget build(BuildContext context) {
     final fix = tracker.lastFix;
     final (label, color) = switch (fix) {
+      _ when tracker.gpsProblem != null => ('No GPS', AppColors.danger),
       null => ('Searching GPS', Colors.orange),
       _ when tracker.hasGoodFix => (
         'GPS ±${fix.accuracy.round()} m',
         AppColors.go,
+      ),
+      _ when !RunTracker.hasAccuracyEstimate(fix) => (
+        'GPS accuracy unknown',
+        Colors.orange,
       ),
       _ => ('Weak GPS ±${fix.accuracy.round()} m', Colors.orange),
     };
@@ -406,59 +411,67 @@ class _ActivePanel extends StatelessWidget {
     return Column(
       children: [
         const _Grabber(),
-        const SizedBox(height: 12),
-        _StatusChip(paused: paused),
-        const SizedBox(height: 4),
-        Metric(
-          value: formatKm(tracker.distanceMeters),
-          unit: 'KM',
-          label: 'Distance',
-          size: 96,
-        ),
-        const SizedBox(height: 16),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: IntrinsicHeight(
-            child: Row(
-              children: [
-                Expanded(
-                  child: Metric(
-                    value: formatDuration(tracker.elapsed),
-                    label: 'Time',
-                  ),
-                ),
-                const VerticalDivider(width: 1),
-                Expanded(
-                  child: Metric(
-                    value: formatPace(tracker.averagePaceSecPerKm),
-                    label: 'Avg /km',
-                  ),
-                ),
-                const VerticalDivider(width: 1),
-                Expanded(
-                  child: Metric(
-                    value: formatPace(tracker.currentPaceSecPerKm),
-                    label: 'Now /km',
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SectionHeader('Splits'),
+        // Everything above the controls scrolls together, so the panel never
+        // overflows on short screens or when the GPS banner is shown.
         Expanded(
           child: ShaderMask(
-            // Fade the list out under the controls.
+            // Fade the content out under the controls.
             shaderCallback: (r) => const LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
               colors: [Colors.black, Colors.black, Colors.transparent],
-              stops: [0, 0.7, 1],
+              stops: [0, 0.85, 1],
             ).createShader(r),
             blendMode: BlendMode.dstIn,
             child: ListView(
-              padding: const EdgeInsets.only(bottom: 40),
-              children: [SplitsTable(splits: splits)],
+              padding: const EdgeInsets.only(top: 12, bottom: 40),
+              children: [
+                Center(child: _StatusChip(paused: paused)),
+                if (tracker.gpsProblem case final problem?)
+                  _GpsProblemBanner(
+                    message: problem,
+                    onRetry: tracker.retryGps,
+                  ),
+                const SizedBox(height: 4),
+                Metric(
+                  value: formatKm(tracker.distanceMeters),
+                  unit: 'KM',
+                  label: 'Distance',
+                  size: 96,
+                ),
+                const SizedBox(height: 16),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: IntrinsicHeight(
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Metric(
+                            value: formatDuration(tracker.elapsed),
+                            label: 'Time',
+                          ),
+                        ),
+                        const VerticalDivider(width: 1),
+                        Expanded(
+                          child: Metric(
+                            value: formatPace(tracker.averagePaceSecPerKm),
+                            label: 'Avg /km',
+                          ),
+                        ),
+                        const VerticalDivider(width: 1),
+                        Expanded(
+                          child: Metric(
+                            value: formatPace(tracker.currentPaceSecPerKm),
+                            label: 'Now /km',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SectionHeader('Splits'),
+                SplitsTable(splits: splits),
+              ],
             ),
           ),
         ),
@@ -470,6 +483,51 @@ class _ActivePanel extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _GpsProblemBanner extends StatelessWidget {
+  const _GpsProblemBanner({required this.message, required this.onRetry});
+
+  final String message;
+  final Future<String?> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
+      child: Panel(
+        color: AppColors.danger,
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        child: Row(
+          children: [
+            const Icon(Icons.location_disabled_rounded, color: Colors.white),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
+              ),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.white),
+              onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final error = await onRetry();
+                if (error != null) {
+                  messenger.showSnackBar(SnackBar(content: Text(error)));
+                }
+              },
+              child: const Text('RETRY'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }

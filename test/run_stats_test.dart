@@ -145,4 +145,26 @@ void main() {
     }
     expect(withAltitude.elevationGainMeters, 0);
   });
+
+  test('current pace slows down, then disappears, when standing still', () {
+    final b = RunStatsBuilder();
+    for (var i = 0; i <= 20; i++) {
+      b.add(_pt(i * 10.0, i * 3)); // 5:00 /km
+    }
+    expect(b.currentPaceSecPerKm, closeTo(300, 1));
+    // Stopped at a red light: fixes keep coming at the same place.
+    for (var s = 61; s <= 75; s++) {
+      b.add(_pt(200, s));
+    }
+    expect(b.currentPaceSecPerKm, greaterThan(400));
+    for (var s = 76; s <= 110; s++) {
+      b.add(_pt(200, s));
+    }
+    expect(b.currentPaceSecPerKm, isNull);
+    // Running again.
+    for (var i = 1; i <= 12; i++) {
+      b.add(_pt(200 + i * 10.0, 110 + i * 3));
+    }
+    expect(b.currentPaceSecPerKm, lessThan(700));
+  });
 }
