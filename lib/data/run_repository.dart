@@ -208,8 +208,20 @@ class RunRepository extends ChangeNotifier {
   Future<int> startRun(DateTime start) =>
       _db.insert('runs', {'start_time': start.millisecondsSinceEpoch});
 
-  Future<void> addPoint(int runId, int seq, TrackPoint pt) =>
-      _db.insert('points', _pointRow(runId, seq, pt));
+  /// Stores points of a run being recorded, in one transaction.
+  /// `INSERT OR REPLACE`: retrying a batch that partly failed is harmless.
+  Future<void> addPoints(int runId, List<(int, TrackPoint)> points) =>
+      _db.transaction((txn) async {
+        final batch = txn.batch();
+        for (final (seq, pt) in points) {
+          batch.insert(
+            'points',
+            _pointRow(runId, seq, pt),
+            conflictAlgorithm: ConflictAlgorithm.replace,
+          );
+        }
+        await batch.commit(noResult: true);
+      });
 
   static Map<String, Object?> _pointRow(int runId, int seq, TrackPoint pt) => {
     'run_id': runId,

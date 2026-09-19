@@ -19,11 +19,11 @@ const _tileFilter = ColorFilter.matrix([
   0, 0, 0, 1, 0,
 ]);
 
-Widget mapTiles() => TileLayer(
-  urlTemplate: _tileUrl,
-  userAgentPackageName: _userAgent,
-  tileBuilder: (context, tile, _) =>
-      ColorFiltered(colorFilter: _tileFilter, child: tile),
+/// One filter over the whole tile layer: a single offscreen pass, instead of
+/// one per tile when applied in `tileBuilder`.
+Widget mapTiles() => ColorFiltered(
+  colorFilter: _tileFilter,
+  child: TileLayer(urlTemplate: _tileUrl, userAgentPackageName: _userAgent),
 );
 
 List<Polyline> _polylines(List<TrackPoint> points) {
@@ -158,10 +158,14 @@ class LiveRunMap extends StatefulWidget {
     super.key,
     required this.points,
     required this.position,
+    this.trackVersion = 0,
     this.bottomInset = 0,
   });
 
   final List<TrackPoint> points;
+
+  /// Changes whenever [points] grows (it may be the same list instance).
+  final int trackVersion;
   final LatLng? position;
 
   /// Height of the panel covering the bottom of the map: controls and the
@@ -177,9 +181,35 @@ class _LiveRunMapState extends State<LiveRunMap> {
   bool _ready = false;
   bool _follow = true;
 
+  /// Where the camera was last centered; small moves are ignored.
+  LatLng? _center;
+  static const _recenterMeters = 3.0;
+
+  /// Route polylines, rebuilt only when the route changes.
+  List<Polyline> _lines = const [];
+  int? _linesVersion;
+  int? _linesLength;
+
+  List<Polyline> _polylinesFor(LiveRunMap w) {
+    if (w.trackVersion != _linesVersion || w.points.length != _linesLength) {
+      _lines = _polylines(w.points);
+      _linesVersion = w.trackVersion;
+      _linesLength = w.points.length;
+    }
+    return _lines;
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
   /// Centers [pos] in the part of the map not covered by the bottom panel.
-  void _moveTo(LatLng pos, double zoom) =>
-      _controller.move(pos, zoom, offset: Offset(0, -widget.bottomInset / 2));
+  void _moveTo(LatLng pos, double zoom) {
+    _center = pos;
+    _controller.move(pos, zoom, offset: Offset(0, -widget.bottomInset / 2));
+  }
 
   @override
   void didUpdateWidget(LiveRunMap old) {
@@ -188,7 +218,10 @@ class _LiveRunMapState extends State<LiveRunMap> {
     if (!_ready || !_follow || pos == null) return;
     if (old.position == null) {
       _moveTo(pos, 17); // First fix: zoom in from the world view.
-    } else if (pos != old.position || widget.bottomInset != old.bottomInset) {
+    } else if (widget.bottomInset != old.bottomInset ||
+        _center == null ||
+        const Distance().as(LengthUnit.Meter, _center!, pos) >=
+            _recenterMeters) {
       _moveTo(pos, _controller.camera.zoom);
     }
   }
@@ -216,7 +249,7 @@ class _LiveRunMapState extends State<LiveRunMap> {
           ),
           children: [
             mapTiles(),
-            PolylineLayer(polylines: _polylines(widget.points)),
+            PolylineLayer(polylines: _polylinesFor(widget)),
             if (pos != null)
               MarkerLayer(
                 markers: [

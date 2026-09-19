@@ -129,10 +129,11 @@ class _RunScreenState extends State<RunScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final tracker = context.watch<RunTracker>();
-    final fix = tracker.lastFix;
-    final position = fix == null ? null : LatLng(fix.latitude, fix.longitude);
-    final idle = tracker.state == TrackerState.idle;
+    // Only the run state here: each part below listens to just what it shows,
+    // so the per-second tick doesn't rebuild the map.
+    final idle = context.select<RunTracker, bool>(
+      (t) => t.state == TrackerState.idle,
+    );
     final height = MediaQuery.sizeOf(context).height;
     final panelHeight = idle ? 400.0 : height * 0.6;
 
@@ -142,10 +143,9 @@ class _RunScreenState extends State<RunScreen> {
         body: Stack(
           children: [
             Positioned.fill(
-              child: LiveRunMap(
-                points: idle ? const [] : tracker.track,
-                position: position,
-                bottomInset: panelHeight,
+              // Own layer: the per-second panel updates don't repaint the map.
+              child: RepaintBoundary(
+                child: _Map(showTrack: !idle, bottomInset: panelHeight),
               ),
             ),
             Positioned(
@@ -153,11 +153,7 @@ class _RunScreenState extends State<RunScreen> {
               left: 16,
               right: 16,
               child: Row(
-                children: [
-                  const _Wordmark(),
-                  const Spacer(),
-                  _GpsPill(tracker: tracker),
-                ],
+                children: [const _Wordmark(), const Spacer(), const _GpsPill()],
               ),
             ),
             AnimatedPositioned(
@@ -179,14 +175,44 @@ class _RunScreenState extends State<RunScreen> {
                     ),
                   ],
                 ),
-                child: idle
-                    ? _IdlePanel(onStart: _start, hasFix: tracker.hasGoodFix)
-                    : _ActivePanel(tracker: tracker, onFinish: _finish),
+                child: RepaintBoundary(
+                  child: idle
+                      ? _IdlePanel(onStart: _start)
+                      : _ActivePanel(onFinish: _finish),
+                ),
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The live map. Rebuilds when the route grows or the runner moves by about
+/// a meter, not on every tick or GPS jitter.
+class _Map extends StatelessWidget {
+  const _Map({required this.showTrack, required this.bottomInset});
+
+  final bool showTrack;
+  final double bottomInset;
+
+  @override
+  Widget build(BuildContext context) {
+    final (version, lat, lon) = context.select<RunTracker, (int, int?, int?)>(
+      (t) => (
+        t.trackVersion,
+        // ~1 m steps (1e-5°), so sub-meter noise doesn't rebuild the map.
+        t.lastFix == null ? null : (t.lastFix!.latitude * 1e5).round(),
+        t.lastFix == null ? null : (t.lastFix!.longitude * 1e5).round(),
+      ),
+    );
+    final tracker = context.read<RunTracker>();
+    return LiveRunMap(
+      points: showTrack ? tracker.track : const [],
+      trackVersion: version,
+      position: lat == null ? null : LatLng(lat / 1e5, lon! / 1e5),
+      bottomInset: bottomInset,
     );
   }
 }
@@ -215,26 +241,23 @@ class _Wordmark extends StatelessWidget {
 }
 
 class _GpsPill extends StatelessWidget {
-  const _GpsPill({required this.tracker});
-
-  final RunTracker tracker;
+  const _GpsPill();
 
   @override
   Widget build(BuildContext context) {
-    final fix = tracker.lastFix;
-    final (label, color) = switch (fix) {
-      _ when tracker.gpsProblem != null => ('No GPS', AppColors.danger),
-      null => ('Searching GPS', Colors.orange),
-      _ when tracker.hasGoodFix => (
-        'GPS ±${fix.accuracy.round()} m',
-        AppColors.go,
-      ),
-      _ when !RunTracker.hasAccuracyEstimate(fix) => (
-        'GPS accuracy unknown',
-        Colors.orange,
-      ),
-      _ => ('Weak GPS ±${fix.accuracy.round()} m', Colors.orange),
-    };
+    final (label, color) = context.select<RunTracker, (String, Color)>((t) {
+      final fix = t.lastFix;
+      return switch (fix) {
+        _ when t.gpsProblem != null => ('No GPS', AppColors.danger),
+        null => ('Searching GPS', Colors.orange),
+        _ when t.hasGoodFix => ('GPS ±${fix.accuracy.round()} m', AppColors.go),
+        _ when !RunTracker.hasAccuracyEstimate(fix) => (
+          'GPS accuracy unknown',
+          Colors.orange,
+        ),
+        _ => ('Weak GPS ±${fix.accuracy.round()} m', Colors.orange),
+      };
+    });
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -279,13 +302,13 @@ class _Grabber extends StatelessWidget {
 }
 
 class _IdlePanel extends StatelessWidget {
-  const _IdlePanel({required this.onStart, required this.hasFix});
+  const _IdlePanel({required this.onStart});
 
   final VoidCallback onStart;
-  final bool hasFix;
 
   @override
   Widget build(BuildContext context) {
+    final hasFix = context.select<RunTracker, bool>((t) => t.hasGoodFix);
     return Column(
       children: [
         const _Grabber(),
@@ -399,13 +422,15 @@ class _GoButton extends StatelessWidget {
 }
 
 class _ActivePanel extends StatelessWidget {
-  const _ActivePanel({required this.tracker, required this.onFinish});
+  const _ActivePanel({required this.onFinish});
 
-  final RunTracker tracker;
   final VoidCallback onFinish;
 
   @override
   Widget build(BuildContext context) {
+    // The stats change every second (time, average pace): this panel is the
+    // one part of the screen that follows the ticker.
+    final tracker = context.watch<RunTracker>();
     final paused = tracker.state == TrackerState.paused;
     final splits = tracker.splits.reversed.toList();
     return Column(

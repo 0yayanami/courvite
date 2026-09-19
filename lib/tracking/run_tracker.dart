@@ -1,6 +1,7 @@
 import 'dart:async';
+import 'dart:collection';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -11,8 +12,9 @@ import 'run_stats.dart';
 enum TrackerState { idle, running, paused }
 
 /// Records a run: listens to GPS through a foreground service (so tracking
-/// continues with the screen off), computes live stats and persists every
-/// accepted point immediately so nothing is lost if the process dies.
+/// continues with the screen off), computes live stats and persists accepted
+/// points in small batches, so at most a few seconds are lost if the process
+/// dies.
 class RunTracker extends ChangeNotifier {
   RunTracker(this._repo);
 
@@ -38,6 +40,20 @@ class RunTracker extends ChangeNotifier {
   /// own failure, so one failed insert never breaks the chain.
   Future<void> _writes = Future.value();
 
+  /// Accepted points not yet written. Writing them in batches means one disk
+  /// transaction every ~10 s instead of one per second.
+  final List<(int, TrackPoint)> _buffer = [];
+  static const _batchSize = 10;
+
+  /// Stops the per-second ticker while the app is hidden (screen off).
+  AppLifecycleListener? _lifecycle;
+  bool _appVisible = true;
+
+  /// Bumped whenever a point is added to [track], so widgets can rebuild only
+  /// when the route actually changes.
+  int _trackVersion = 0;
+  int get trackVersion => _trackVersion;
+
   /// Points whose write failed, retried when the run ends.
   final List<(int, TrackPoint)> _unsaved = [];
 
@@ -51,7 +67,8 @@ class RunTracker extends ChangeNotifier {
   /// Set when the location stream reports an error during a run.
   String? _gpsError;
 
-  List<TrackPoint> get track => List.unmodifiable(_track);
+  /// A read-only view (no copy) of the recorded route.
+  List<TrackPoint> get track => UnmodifiableListView(_track);
   Position? get lastFix => _lastFix;
   double get distanceMeters => _stats.distanceMeters;
   double? get currentPaceSecPerKm =>
@@ -165,15 +182,40 @@ class RunTracker extends ChangeNotifier {
     _accumulated = Duration.zero;
     _segmentStart = now;
     _unsaved.clear();
+    _buffer.clear();
     _writes = Future.value();
+    _trackVersion++;
     _state = TrackerState.running;
     _listenForRun();
-
-    _ticker = Timer.periodic(
-      const Duration(seconds: 1),
-      (_) => notifyListeners(),
+    _lifecycle ??= AppLifecycleListener(
+      onShow: () {
+        _appVisible = true;
+        _syncTicker();
+        notifyListeners(); // Catch up on what happened while hidden.
+      },
+      onHide: () {
+        _appVisible = false;
+        _syncTicker();
+        _flush(); // Don't keep points only in memory while in background.
+      },
     );
+    _syncTicker();
     notifyListeners();
+  }
+
+  /// The ticker only updates the displayed time: it runs while a run is in
+  /// progress (not paused) and the app is visible.
+  void _syncTicker() {
+    final wanted = _state == TrackerState.running && _appVisible;
+    if (wanted && _ticker == null) {
+      _ticker = Timer.periodic(
+        const Duration(seconds: 1),
+        (_) => notifyListeners(),
+      );
+    } else if (!wanted) {
+      _ticker?.cancel();
+      _ticker = null;
+    }
   }
 
   /// (Re)subscribes to GPS through the foreground service.
@@ -246,20 +288,29 @@ class RunTracker extends ChangeNotifier {
       );
       if (_stats.add(pt)) {
         _track.add(pt);
-        final runId = _runId!;
-        final seq = _seq++;
-        _writes = _writes.then((_) => _save(runId, seq, pt));
+        _trackVersion++;
+        _buffer.add((_seq++, pt));
+        if (_buffer.length >= _batchSize) _flush();
       }
     }
     notifyListeners();
   }
 
-  Future<void> _save(int runId, int seq, TrackPoint pt) async {
+  /// Queues the buffered points for writing, in one transaction.
+  void _flush() {
+    final runId = _runId;
+    if (runId == null || _buffer.isEmpty) return;
+    final batch = List.of(_buffer);
+    _buffer.clear();
+    _writes = _writes.then((_) => _save(runId, batch));
+  }
+
+  Future<void> _save(int runId, List<(int, TrackPoint)> batch) async {
     try {
-      await _repo.addPoint(runId, seq, pt);
+      await _repo.addPoints(runId, batch);
     } on Object catch (e) {
-      debugPrint('Could not save point $seq: $e');
-      _unsaved.add((seq, pt));
+      debugPrint('Could not save ${batch.length} points: $e');
+      _unsaved.addAll(batch);
     }
   }
 
@@ -268,6 +319,8 @@ class RunTracker extends ChangeNotifier {
     _accumulated = elapsed;
     _segmentStart = null;
     _state = TrackerState.paused;
+    _syncTicker();
+    _flush();
     notifyListeners();
   }
 
@@ -276,6 +329,7 @@ class RunTracker extends ChangeNotifier {
     _segment++;
     _segmentStart = DateTime.now();
     _state = TrackerState.running;
+    _syncTicker();
     notifyListeners();
   }
 
@@ -307,17 +361,19 @@ class RunTracker extends ChangeNotifier {
     _sub = null;
     _ticker?.cancel();
     _ticker = null;
+    _lifecycle?.dispose();
+    _lifecycle = null;
+    _appVisible = true;
+    _flush();
     await _writes;
     // Second chance for points that failed to save (e.g. a transient error).
     final runId = _runId;
-    if (runId != null) {
-      for (final (seq, pt) in List.of(_unsaved)) {
-        try {
-          await _repo.addPoint(runId, seq, pt);
-          _unsaved.remove((seq, pt));
-        } on Object catch (e) {
-          debugPrint('Point $seq is lost: $e');
-        }
+    if (runId != null && _unsaved.isNotEmpty) {
+      try {
+        await _repo.addPoints(runId, _unsaved);
+        _unsaved.clear();
+      } on Object catch (e) {
+        debugPrint('${_unsaved.length} points are lost: $e');
       }
     }
     _gpsError = null;
@@ -332,6 +388,7 @@ class RunTracker extends ChangeNotifier {
   void dispose() {
     _sub?.cancel();
     _ticker?.cancel();
+    _lifecycle?.dispose();
     super.dispose();
   }
 }
