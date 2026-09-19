@@ -3,6 +3,13 @@
 A privacy-friendly running tracker for Android. It's like Strava, but everything
 stays on your phone. There's no account, no ads, no analytics and no cloud.
 
+<p align="center">
+  <img src="docs/screenshots/home.png" width="24%" alt="Run screen">
+  <img src="docs/screenshots/runs.png" width="24%" alt="Run history">
+  <img src="docs/screenshots/progress.png" width="24%" alt="Weekly progress">
+  <img src="docs/screenshots/territory.png" width="24%" alt="Captured territory">
+</p>
+
 ## Features
 
 - **Live tracking** with GPS: distance, time, average and current pace (min/km),
