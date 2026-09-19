@@ -8,6 +8,7 @@ import '../format.dart';
 import '../history/history_screen.dart';
 import '../theme.dart';
 import '../widgets/metric.dart';
+import '../widgets/topo_background.dart';
 
 /// This week's daily distances, or a month calendar of active days.
 class StatsView extends StatefulWidget {
@@ -169,30 +170,43 @@ class _TotalsPanel extends StatelessWidget {
     );
     return Panel(
       color: AppColors.ink,
-      padding: const EdgeInsets.fromLTRB(22, 20, 22, 22),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: EdgeInsets.zero,
+      child: Stack(
         children: [
-          Text(label.toUpperCase(), style: labelStyle(color: Colors.white70)),
-          const SizedBox(height: 8),
-          Metric(
-            value: formatKm(totals.distanceMeters),
-            unit: 'KM',
-            label: 'Distance',
-            size: 72,
-            color: AppColors.volt,
-            labelColor: Colors.white70,
-            alignment: CrossAxisAlignment.start,
-          ),
-          const SizedBox(height: 20),
-          Row(
-            children: [
-              Expanded(child: small('${totals.runs}', 'Runs')),
-              Expanded(child: small(formatDuration(totals.duration), 'Time')),
-              Expanded(
-                child: small(formatPace(totals.paceSecPerKm), 'Pace /km'),
-              ),
-            ],
+          const Positioned.fill(child: TopoBackground()),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(22, 20, 22, 22),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label.toUpperCase(),
+                  style: labelStyle(color: Colors.white70),
+                ),
+                const SizedBox(height: 8),
+                Metric(
+                  value: formatKm(totals.distanceMeters),
+                  unit: 'KM',
+                  label: 'Distance',
+                  size: 72,
+                  color: AppColors.volt,
+                  labelColor: Colors.white70,
+                  alignment: CrossAxisAlignment.start,
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(child: small('${totals.runs}', 'Runs')),
+                    Expanded(
+                      child: small(formatDuration(totals.duration), 'Time'),
+                    ),
+                    Expanded(
+                      child: small(formatPace(totals.paceSecPerKm), 'Pace /km'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ],
       ),
