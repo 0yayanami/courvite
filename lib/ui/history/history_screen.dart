@@ -190,6 +190,11 @@ class _RunCard extends StatelessWidget {
                       icon: Icons.speed_rounded,
                       text: '${formatPace(run.paceSecPerKm)} /km',
                     ),
+                    if (run.capturedM2 > 0)
+                      _Stat(
+                        icon: Icons.flag_rounded,
+                        text: '${formatArea(run.capturedM2)} km²',
+                      ),
                   ],
                 ),
               ],

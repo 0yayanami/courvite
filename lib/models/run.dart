@@ -45,6 +45,7 @@ class RunSummary {
     this.bestEfforts = const {},
     this.elevationGainMeters,
     this.elevationLossMeters,
+    this.capturedM2 = 0,
   });
 
   final int id;
@@ -61,6 +62,9 @@ class RunSummary {
 
   final double? elevationGainMeters;
   final double? elevationLossMeters;
+
+  /// Area enclosed by the loops of this run (see Territory), in m².
+  final double capturedM2;
 
   /// Average pace in seconds per kilometer, or null when no distance was covered.
   double? get paceSecPerKm => paceFor(distanceMeters, duration);

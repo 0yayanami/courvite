@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'data_sheet.dart';
 import 'history/history_screen.dart';
 import 'stats/stats_view.dart';
+import 'territory/territory_view.dart';
 import 'theme.dart';
 
 /// Past runs and weekly/monthly activity.
@@ -12,7 +13,7 @@ class ActivityScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return DefaultTabController(
-      length: 2,
+      length: 3,
       child: Scaffold(
         body: SafeArea(
           bottom: false,
@@ -24,14 +25,21 @@ class ActivityScreen extends StatelessWidget {
                 child: Row(
                   children: [
                     Expanded(child: Text('ACTIVITY', style: headlineStyle(44))),
-                    IconButton.filled(
+                    FilledButton.icon(
                       onPressed: () => showDataSheet(context),
-                      tooltip: 'Backup & restore',
-                      style: IconButton.styleFrom(
+                      style: FilledButton.styleFrom(
                         backgroundColor: AppColors.card,
                         foregroundColor: AppColors.ink,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 10,
+                        ),
                       ),
-                      icon: const Icon(Icons.import_export_rounded),
+                      icon: const Icon(Icons.import_export_rounded, size: 20),
+                      label: Text(
+                        'BACKUP',
+                        style: labelStyle(color: AppColors.ink, size: 13),
+                      ),
                     ),
                   ],
                 ),
@@ -59,13 +67,16 @@ class ActivityScreen extends StatelessWidget {
                     tabs: const [
                       Tab(text: 'RUNS'),
                       Tab(text: 'PROGRESS'),
+                      Tab(text: 'TERRITORY'),
                     ],
                   ),
                 ),
               ),
               const SizedBox(height: 8),
               const Expanded(
-                child: TabBarView(children: [HistoryView(), StatsView()]),
+                child: TabBarView(
+                  children: [HistoryView(), StatsView(), TerritoryView()],
+                ),
               ),
             ],
           ),

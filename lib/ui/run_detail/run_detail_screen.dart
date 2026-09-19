@@ -13,7 +13,7 @@ import '../widgets/run_map.dart';
 import '../widgets/splits_table.dart';
 
 class _RunDetail {
-  _RunDetail(this.run, this.points, this.medals)
+  _RunDetail(this.run, this.points, this.medals, this.cells, this.newM2)
     : splits = RunStatsBuilder.fromPoints(points).splits(total: run.duration);
 
   final RunSummary run;
@@ -22,6 +22,10 @@ class _RunDetail {
 
   /// Medals won by this run: distance km → rank (0 gold, 1 silver, 2 bronze).
   final Map<int, int> medals;
+
+  /// Territory cells captured by this run, and the area no earlier run had.
+  final List<int> cells;
+  final double newM2;
 }
 
 class RunDetailScreen extends StatefulWidget {
@@ -44,6 +48,8 @@ class _RunDetailScreenState extends State<RunDetailScreen> {
       run,
       await repo.loadPoints(widget.runId),
       medalRanks(await repo.listRuns())[run.id] ?? const {},
+      await repo.runCells(run.id),
+      await repo.newTerritoryM2(run.id),
     );
   }
 
@@ -156,7 +162,11 @@ class _DetailBody extends StatelessWidget {
                   ),
                   child: Stack(
                     children: [
-                      RunRouteMap(points: detail.points, interactive: false),
+                      RunRouteMap(
+                        points: detail.points,
+                        captured: detail.cells,
+                        interactive: false,
+                      ),
                       Positioned.fill(
                         child: Material(
                           type: MaterialType.transparency,
@@ -165,8 +175,10 @@ class _DetailBody extends StatelessWidget {
                                 ? null
                                 : () => Navigator.of(context).push(
                                     MaterialPageRoute<void>(
-                                      builder: (_) =>
-                                          _FullMapScreen(points: detail.points),
+                                      builder: (_) => _FullMapScreen(
+                                        points: detail.points,
+                                        captured: detail.cells,
+                                      ),
                                     ),
                                   ),
                           ),
@@ -200,29 +212,32 @@ class _DetailBody extends StatelessWidget {
                 Positioned(
                   left: 16,
                   bottom: 16,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 6,
-                    ),
-                    decoration: BoxDecoration(
-                      color: AppColors.ink.withValues(alpha: 0.8),
-                      borderRadius: BorderRadius.circular(14),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.open_in_full_rounded,
-                          size: 14,
-                          color: Colors.white,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          'EXPAND',
-                          style: labelStyle(color: Colors.white, size: 11),
-                        ),
-                      ],
+                  // Decoration only: taps go through to the map below.
+                  child: IgnorePointer(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppColors.ink.withValues(alpha: 0.8),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.open_in_full_rounded,
+                            size: 14,
+                            color: Colors.white,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            'EXPAND',
+                            style: labelStyle(color: Colors.white, size: 11),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -309,6 +324,13 @@ class _DetailBody extends StatelessWidget {
               ),
             ),
           ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+          child: _TerritoryTile(
+            capturedM2: run.capturedM2,
+            newM2: detail.newM2,
+          ),
+        ),
         if (run.elevationGainMeters != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
@@ -341,6 +363,89 @@ class _DetailBody extends StatelessWidget {
         SplitsTable(splits: detail.splits),
         SizedBox(height: 32 + MediaQuery.paddingOf(context).bottom),
       ],
+    );
+  }
+}
+
+class _TerritoryTile extends StatelessWidget {
+  const _TerritoryTile({required this.capturedM2, required this.newM2});
+
+  final double capturedM2;
+  final double newM2;
+
+  @override
+  Widget build(BuildContext context) {
+    if (capturedM2 <= 0) {
+      return Panel(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: Row(
+          children: [
+            const Icon(Icons.flag_outlined, color: AppColors.muted),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                'No territory captured. Close a loop during a run to capture '
+                'the land inside it.',
+                style: const TextStyle(color: AppColors.inkSoft, fontSize: 14),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+    return Panel(
+      color: AppColors.volt,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: const BoxDecoration(
+              color: AppColors.ink,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.flag_rounded, color: AppColors.volt),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'TERRITORY CAPTURED',
+                  style: labelStyle(color: AppColors.ink),
+                ),
+                const SizedBox(height: 2),
+                Text.rich(
+                  TextSpan(
+                    children: [
+                      TextSpan(
+                        text: formatArea(capturedM2),
+                        style: numberStyle(30),
+                      ),
+                      TextSpan(text: ' KM²', style: numberStyle(14)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Text(
+                newM2 > 0 ? '+${formatArea(newM2)}' : 'ALREADY',
+                style: numberStyle(22),
+              ),
+              Text(
+                newM2 > 0 ? 'KM² NEW' : 'YOURS',
+                style: labelStyle(color: AppColors.ink, size: 10),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -463,15 +568,16 @@ class _BestEffortRow extends StatelessWidget {
 }
 
 class _FullMapScreen extends StatelessWidget {
-  const _FullMapScreen({required this.points});
+  const _FullMapScreen({required this.points, required this.captured});
 
   final List<TrackPoint> points;
+  final List<int> captured;
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: const Text('ROUTE')),
-      body: RunRouteMap(points: points),
+      body: RunRouteMap(points: points, captured: captured),
     );
   }
 }

@@ -199,6 +199,7 @@ class RunTracker extends ChangeNotifier {
       endTime: DateTime.now(),
       duration: duration,
       stats: _stats,
+      points: List.of(_track),
     );
     return runId;
   }

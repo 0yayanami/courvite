@@ -6,6 +6,7 @@ import 'package:latlong2/latlong.dart' hide Path;
 
 import '../../models/run.dart';
 import '../theme.dart';
+import 'territory_layer.dart';
 
 const _tileUrl = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 const _userAgent = 'io.github.courvite.courvite';
@@ -18,7 +19,7 @@ const _tileFilter = ColorFilter.matrix([
   0, 0, 0, 1, 0,
 ]);
 
-Widget _tiles() => TileLayer(
+Widget mapTiles() => TileLayer(
   urlTemplate: _tileUrl,
   userAgentPackageName: _userAgent,
   tileBuilder: (context, tile, _) =>
@@ -72,7 +73,7 @@ Widget _me() => Container(
   child: _marker(fill: AppColors.volt, border: AppColors.ink),
 );
 
-Widget _attribution({
+Widget mapAttribution({
   AttributionAlignment alignment = AttributionAlignment.bottomRight,
 }) => RichAttributionWidget(
   alignment: alignment,
@@ -82,10 +83,18 @@ Widget _attribution({
 
 /// Static map of a finished run, framed on the whole path.
 class RunRouteMap extends StatelessWidget {
-  const RunRouteMap({super.key, required this.points, this.interactive = true});
+  const RunRouteMap({
+    super.key,
+    required this.points,
+    this.interactive = true,
+    this.captured = const [],
+  });
 
   final List<TrackPoint> points;
   final bool interactive;
+
+  /// Territory cells captured by the run, shaded under the route.
+  final List<int> captured;
 
   @override
   Widget build(BuildContext context) {
@@ -116,7 +125,8 @@ class RunRouteMap extends StatelessWidget {
         ),
       ),
       children: [
-        _tiles(),
+        mapTiles(),
+        if (captured.isNotEmpty) TerritoryLayer(cells: captured),
         PolylineLayer(polylines: _polylines(points)),
         MarkerLayer(
           markers: [
@@ -135,7 +145,7 @@ class RunRouteMap extends StatelessWidget {
               ),
           ],
         ),
-        _attribution(),
+        mapAttribution(),
       ],
     );
   }
@@ -205,7 +215,7 @@ class _LiveRunMapState extends State<LiveRunMap> {
             },
           ),
           children: [
-            _tiles(),
+            mapTiles(),
             PolylineLayer(polylines: _polylines(widget.points)),
             if (pos != null)
               MarkerLayer(
@@ -216,7 +226,7 @@ class _LiveRunMapState extends State<LiveRunMap> {
             // Kept visible above the bottom panel, away from the recenter button.
             Padding(
               padding: EdgeInsets.only(bottom: widget.bottomInset),
-              child: _attribution(alignment: AttributionAlignment.bottomLeft),
+              child: mapAttribution(alignment: AttributionAlignment.bottomLeft),
             ),
           ],
         ),

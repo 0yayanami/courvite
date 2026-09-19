@@ -43,3 +43,9 @@ String runTitle(DateTime t) {
       : 'Night';
   return '$part run';
 }
+
+/// Area in km² without unit, with more decimals for small areas: `0.253`.
+String formatArea(double m2) {
+  final km2 = m2 / 1e6;
+  return km2.toStringAsFixed(km2 >= 10 ? 1 : (km2 >= 1 ? 2 : 3));
+}

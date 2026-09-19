@@ -4,6 +4,7 @@ import 'package:sqflite/sqflite.dart';
 
 import '../models/run.dart';
 import '../tracking/run_stats.dart';
+import '../tracking/territory.dart';
 import 'backup.dart';
 
 /// Local SQLite storage for runs and their GPS tracks. Nothing ever leaves
@@ -17,10 +18,11 @@ class RunRepository extends ChangeNotifier {
     final path = p.join(await getDatabasesPath(), 'courvite.db');
     final db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onConfigure: (db) => db.execute('PRAGMA foreign_keys = ON'),
       onUpgrade: (db, from, to) async {
         if (from < 2) await _addStatsColumns(db);
+        if (from < 3) await _addTerritory(db);
       },
       onCreate: (db, version) async {
         await db.execute('''
@@ -44,6 +46,7 @@ class RunRepository extends ChangeNotifier {
             PRIMARY KEY (run_id, seq)
           )''');
         await _addStatsColumns(db);
+        await _addTerritory(db);
       },
     );
     final repo = RunRepository._(db);
@@ -53,7 +56,7 @@ class RunRepository extends ChangeNotifier {
   }
 
   /// Bump to recompute the derived stats of every stored run on next launch.
-  static const _statsVersion = 1;
+  static const _statsVersion = 3;
 
   static String _bestColumn(int km) => 'best_${km}k_ms';
 
@@ -70,18 +73,60 @@ class RunRepository extends ChangeNotifier {
     );
   }
 
-  Map<String, Object?> _statsColumns(RunStatsBuilder stats) {
-    final efforts = stats.bestEfforts();
-    return {
-      for (final km in bestEffortDistancesKm)
-        _bestColumn(km): efforts[km]?.inMilliseconds,
-      'elev_gain_m': stats.elevationGainMeters,
-      'elev_loss_m': stats.elevationLossMeters,
-      'stats_version': _statsVersion,
-    };
+  /// Grid cells (see [Territory]) captured by each run. A cell captured by
+  /// several runs has several rows; totals count it once.
+  static Future<void> _addTerritory(Database db) async {
+    await db.execute('ALTER TABLE runs ADD COLUMN captured_m2 REAL');
+    await db.execute('''
+      CREATE TABLE run_cells (
+        cell INTEGER NOT NULL,
+        run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        area_m2 REAL NOT NULL,
+        PRIMARY KEY (cell, run_id)
+      ) WITHOUT ROWID''');
+    await db.execute('CREATE INDEX run_cells_by_run ON run_cells(run_id)');
   }
 
-  /// Computes best efforts and elevation for runs saved before they existed.
+  /// Saves everything derived from a run's points: best efforts, elevation
+  /// and captured territory, plus any [extra] columns of the run.
+  Future<void> _saveDerived(
+    int runId,
+    RunStatsBuilder stats,
+    List<TrackPoint> points, [
+    Map<String, Object?> extra = const {},
+  ]) async {
+    // Flood-filling the grid can take a moment on long runs: off the UI thread.
+    final cells = await compute(Territory.capture, points);
+    final efforts = stats.bestEfforts();
+    await _db.transaction((txn) async {
+      await txn.update(
+        'runs',
+        {
+          ...extra,
+          for (final km in bestEffortDistancesKm)
+            _bestColumn(km): efforts[km]?.inMilliseconds,
+          'elev_gain_m': stats.elevationGainMeters,
+          'elev_loss_m': stats.elevationLossMeters,
+          'captured_m2': Territory.areaM2(cells),
+          'stats_version': _statsVersion,
+        },
+        where: 'id = ?',
+        whereArgs: [runId],
+      );
+      await txn.delete('run_cells', where: 'run_id = ?', whereArgs: [runId]);
+      final batch = txn.batch();
+      for (final cell in cells) {
+        batch.insert('run_cells', {
+          'cell': cell,
+          'run_id': runId,
+          'area_m2': Territory.cellAreaM2(Territory.keyY(cell)),
+        });
+      }
+      await batch.commit(noResult: true);
+    });
+  }
+
+  /// Computes the derived stats of runs saved before they existed.
   Future<void> _backfillStats() async {
     final rows = await _db.query(
       'runs',
@@ -91,13 +136,8 @@ class RunRepository extends ChangeNotifier {
     );
     for (final row in rows) {
       final id = row['id'] as int;
-      final stats = RunStatsBuilder.fromPoints(await loadPoints(id));
-      await _db.update(
-        'runs',
-        _statsColumns(stats),
-        where: 'id = ?',
-        whereArgs: [id],
-      );
+      final points = await loadPoints(id);
+      await _saveDerived(id, RunStatsBuilder.fromPoints(points), points);
     }
   }
 
@@ -121,6 +161,7 @@ class RunRepository extends ChangeNotifier {
           endTime: points.last.time,
           duration: stats.activeTime,
           stats: stats,
+          points: points,
         );
       }
     }
@@ -148,19 +189,54 @@ class RunRepository extends ChangeNotifier {
     required DateTime endTime,
     required Duration duration,
     required RunStatsBuilder stats,
+    required List<TrackPoint> points,
   }) async {
-    await _db.update(
-      'runs',
-      {
-        'end_time': endTime.millisecondsSinceEpoch,
-        'duration_ms': duration.inMilliseconds,
-        'distance_m': stats.distanceMeters,
-        ..._statsColumns(stats),
-      },
-      where: 'id = ?',
+    await _saveDerived(runId, stats, points, {
+      'end_time': endTime.millisecondsSinceEpoch,
+      'duration_ms': duration.inMilliseconds,
+      'distance_m': stats.distanceMeters,
+    });
+    notifyListeners();
+  }
+
+  /// Total captured territory in m², each cell counted once.
+  Future<double> territoryM2() async {
+    final rows = await _db.rawQuery(
+      'SELECT SUM(area_m2) AS a FROM '
+      '(SELECT MAX(area_m2) AS area_m2 FROM run_cells GROUP BY cell)',
+    );
+    return (rows.first['a'] as num?)?.toDouble() ?? 0;
+  }
+
+  /// All captured cells, each once.
+  Future<List<int>> territoryCells() async {
+    final rows = await _db.rawQuery('SELECT DISTINCT cell FROM run_cells');
+    return [for (final r in rows) r['cell'] as int];
+  }
+
+  Future<List<int>> runCells(int runId) async {
+    final rows = await _db.query(
+      'run_cells',
+      columns: ['cell'],
+      where: 'run_id = ?',
       whereArgs: [runId],
     );
-    notifyListeners();
+    return [for (final r in rows) r['cell'] as int];
+  }
+
+  /// Area of [runId]'s capture that no earlier run had captured, in m².
+  Future<double> newTerritoryM2(int runId) async {
+    final rows = await _db.rawQuery(
+      '''
+      SELECT SUM(c.area_m2) AS a FROM run_cells c
+      WHERE c.run_id = ? AND NOT EXISTS (
+        SELECT 1 FROM run_cells o JOIN runs r ON r.id = o.run_id
+        WHERE o.cell = c.cell AND o.run_id != c.run_id
+          AND r.start_time < (SELECT start_time FROM runs WHERE id = ?)
+      )''',
+      [runId, runId],
+    );
+    return (rows.first['a'] as num?)?.toDouble() ?? 0;
   }
 
   /// Every finished run with its track, oldest first, for a backup.
@@ -277,5 +353,6 @@ class RunRepository extends ChangeNotifier {
     },
     elevationGainMeters: (r['elev_gain_m'] as num?)?.toDouble(),
     elevationLossMeters: (r['elev_loss_m'] as num?)?.toDouble(),
+    capturedM2: (r['captured_m2'] as num?)?.toDouble() ?? 0,
   );
 }
