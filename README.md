@@ -41,6 +41,18 @@ flutter test
 flutter run
 ```
 
+Release builds are signed with the key described in `android/key.properties`
+(not in the repository):
+
+```properties
+storePassword=…
+keyPassword=…
+keyAlias=courvite
+storeFile=/path/to/courvite-release.jks
+```
+
+Without that file, `flutter build apk --release` signs with the debug key.
+
 Code layout:
 
 | Path | Contents |
