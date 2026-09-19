@@ -145,7 +145,7 @@ class _RunScreenState extends State<RunScreen> {
               child: LiveRunMap(
                 points: idle ? const [] : tracker.track,
                 position: position,
-                bottomInset: panelHeight - 24,
+                bottomInset: panelHeight,
               ),
             ),
             Positioned(

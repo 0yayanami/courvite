@@ -72,9 +72,12 @@ Widget _me() => Container(
   child: _marker(fill: AppColors.volt, border: AppColors.ink),
 );
 
-Widget _attribution() => const RichAttributionWidget(
+Widget _attribution({
+  AttributionAlignment alignment = AttributionAlignment.bottomRight,
+}) => RichAttributionWidget(
+  alignment: alignment,
   showFlutterMapAttribution: false,
-  attributions: [TextSourceAttribution('OpenStreetMap contributors')],
+  attributions: const [TextSourceAttribution('OpenStreetMap contributors')],
 );
 
 /// Static map of a finished run, framed on the whole path.
@@ -151,7 +154,8 @@ class LiveRunMap extends StatefulWidget {
   final List<TrackPoint> points;
   final LatLng? position;
 
-  /// Height of what overlaps the bottom of the map (keeps controls visible).
+  /// Height of the panel covering the bottom of the map: controls and the
+  /// runner's position are kept in the visible part above it.
   final double bottomInset;
 
   @override
@@ -209,7 +213,11 @@ class _LiveRunMapState extends State<LiveRunMap> {
                   Marker(point: pos, width: 42, height: 42, child: _me()),
                 ],
               ),
-            _attribution(),
+            // Kept visible above the bottom panel, away from the recenter button.
+            Padding(
+              padding: EdgeInsets.only(bottom: widget.bottomInset),
+              child: _attribution(alignment: AttributionAlignment.bottomLeft),
+            ),
           ],
         ),
         if (!_follow && pos != null)
